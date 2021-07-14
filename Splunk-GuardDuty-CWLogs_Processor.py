@@ -1,5 +1,6 @@
 """
-For processing data sent to Firehose by Cloudwatch Logs subscription filters.
+This function as a Kinesis pre-processor function will take Guard Duty Findings from CloudWatch Events/EventBridge
+and process detective URLs based on the findings.
 
 Cloudwatch Logs sends to Firehose records that look like this:
 
@@ -29,16 +30,9 @@ Cloudwatch Logs sends to Firehose records that look like this:
 The code below will:
 
 1) Parse the json
-2) Set the result to ProcessingFailed for any record whose messageType is not DATA_MESSAGE, thus redirecting them to the
-   processing error output. Such records do not contain any log events. You can modify the code to set the result to
-   Dropped instead to get rid of these records completely.
-3) For records whose messageType is DATA_MESSAGE, extract the individual log events from the logEvents field, and pass
-   each one to the transformLogEvent method. You can modify the transformLogEvent method to perform custom
-   transformations on the log events.
-4) Concatenate the result from (3) together and set the result as the data of the record returned to Firehose. Note that
-   this step will not add any delimiters. Delimiters should be appended by the logic within the transformLogEvent
-   method.
-5) Any additional records which exceed 6MB will be re-ingested back into Firehose.
+2) Send the records in the event to ProcessRecords where the record is base64 decoded and parsed to identify the GuardDuty 
+   findings to create detective urls as list fields
+3) Any additional records which exceed 6MB will be re-ingested back into Firehose.
 
 """
 
@@ -66,6 +60,27 @@ def transformLogEvent(log_event, source):
     return_event['event'] = log_event['message']
     return json.dumps(return_event) + '\n'
 
+def find_key_value_pairs(q, keys, dicts=None):
+    if not dicts:
+        dicts = [q]
+        q = [q]  
+
+    data = q.pop(0)
+    if isinstance(data, dict):
+        data = data.values()
+
+    for d in data:
+        dtype = type(d)
+        if dtype is dict or dtype is list:
+            q.append(d)
+            if dtype is dict:
+                dicts.append(d)
+
+    if q:
+        return find_key_value_pairs(q, keys, dicts)
+
+    return [(k, v) for d in dicts for k, v in d.items() if k in keys]
+
 
 def processRecords(records):
     for r in records:
@@ -75,18 +90,73 @@ def processRecords(records):
         recId = r['recordId']
         return_event = {}
         st = data['source'].replace(".", ":") + ":firehose"
-        
-        if ((data['detail-type'] == 'AWS API Call via CloudTrail') or (data['detail-type'] == 'AWS Console Sign In via CloudTrail')):
-            st = 'aws:cloudtrail'
+        prefix_url='https://console.aws.amazon.com/detective/home?region='     
+        data['detail']['detectiveUrls'] = {}
 
-        if (data['detail-type'] == 'Config Configuration Item Change'):
-            st = 'aws:config:notification'
+        ## Set Guard Duty Findings List to generate Guard Duty findings URL
+        guard_duty_findings_list = ['CredentialAccess:IAMUser/AnomalousBehavior','DefenseEvasion:IAMUser/AnomalousBehavior','Discovery:IAMUser/AnomalousBehavior','Exfiltration:IAMUser/AnomalousBehavior'
+                                    ,'Impact:IAMUser/AnomalousBehavior','InitialAccess:IAMUser/AnomalousBehavior','PenTest:IAMUser/KaliLinux','PenTest:IAMUser/ParrotLinux','PenTest:IAMUser/PentooLinux'
+                                    ,'Persistence:IAMUser/AnomalousBehavior','Persistence:IAMUser/NetworkPermissions','Persistence:IAMUser/ResourcePermissions','Persistence:IAMUser/UserPermissions'
+                                    ,'Policy:IAMUser/RootCredentialUsage','PrivilegeEscalation:IAMUser/AdministrativePermissions','PrivilegeEscalation:IAMUser/AnomalousBehavior','Recon:IAMUser/MaliciousIPCaller'
+                                    ,'Recon:IAMUser/MaliciousIPCaller.Custom','Recon:IAMUser/NetworkPermissions','Recon:IAMUser/ResourcePermissions','Recon:IAMUser/TorIPCaller','Recon:IAMUser/UserPermissions'
+                                    ,'ResourceConsumption:IAMUser/ComputeResources','Stealth:IAMUser/CloudTrailLoggingDisabled','Stealth:IAMUser/LoggingConfigurationModified','Stealth:IAMUser/PasswordPolicyChange'
+                                    ,'UnauthorizedAccess:IAMUser/ConsoleLogin','UnauthorizedAccess:IAMUser/ConsoleLoginSuccess.B','UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration','UnauthorizedAccess:IAMUser/MaliciousIPCaller'
+                                    ,'UnauthorizedAccess:IAMUser/MaliciousIPCaller.Custom','UnauthorizedAccess:IAMUser/TorIPCaller','Backdoor:EC2/C&CActivity.B','Backdoor:EC2/DenialOfService.Dns'
+                                    ,'Backdoor:EC2/DenialOfService.Tcp','Backdoor:EC2/DenialOfService.Udp','Backdoor:EC2/DenialOfService.UdpOnTcpPorts','Backdoor:EC2/DenialOfService.UnusualProtocol'
+                                    ,'Backdoor:EC2/Spambot','Behavior:EC2/NetworkPortUnusual','Behavior:EC2/TrafficVolumeUnusual','CryptoCurrency:EC2/BitcoinTool.B','Impact:EC2/PortSweep'
+                                    ,'Impact:EC2/WinRMBruteForce','Recon:EC2/PortProbeEMRUnprotectedPort','Recon:EC2/PortProbeUnprotectedPort','Recon:EC2/Portscan','Trojan:EC2/BlackholeTraffic'
+                                    ,'Trojan:EC2/DropPoint','UnauthorizedAccess:EC2/MaliciousIPCaller.Custom','UnauthorizedAccess:EC2/RDPBruteForce','UnauthorizedAccess:EC2/SSHBruteForce'
+                                    ,'UnauthorizedAccess:EC2/TorClient','UnauthorizedAccess:EC2/TorIPCaller','UnauthorizedAccess:EC2/TorRelay'
+                                    ]
 
-        prefix_url='https://console.aws.amazon.com/detective/home?region='
-        if (("region" in data) and ("id" in data)):
-            data['detail']['detective_url'] = prefix_url+data['region']+'#findings/GuardDuty/'+data['id']
+        if data['detail']['type'] in guard_duty_findings_list:
+            data['detail']['detectiveUrls']['guardDutyFindings'] = prefix_url+data['region']+'#findings/GuardDuty/'+data['detail']['id']
         else: 
-            data['detail']['detective_url'] = "couldn't form detective url"
+            data['detail']['detectiveUrls']['guardDutyFindings'] = None
+
+        ## Generate IAM User URLs for resourceType Access Keys
+        if data['detail']['resource']['resourceType'] == 'AccessKey':
+            data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']
+
+        data['detail']['detectiveUrls']['ec2Instance']  = prefix_url+data['region']+'#entities/Ec2Instance/'+data['detail']['resource']['instanceDetails']['instanceId']
+        data['detail']['detectiveUrls']['awsAccount']  = prefix_url+data['region']+'#entities/AwsAccount/'+data['detail']['accountId']
+
+        ## Get other recurring entities to form URLs
+        ## Get private IP addresses from network interfaces
+        privateIPs = find_key_value_pairs(data['detail'], 'networkInterfaces')
+        
+        index = 0
+        if len(privateIPs) > 0:
+            for k, v in privateIPs:
+                if len(privateIPs) == 1:
+                    data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']
+                else:
+                    data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']
+                index += 1
+        
+        ## Get public IP addresses from network interfaces
+        publicIPs = find_key_value_pairs(data['detail'], 'publicIp')
+        
+        index = 0
+        if len(publicIPs) > 0:
+            for k, v in publicIPs:
+                if len(publicIPs) == 1:
+                    data['detail']['detectiveUrls']['publicIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                else:
+                    data['detail']['detectiveUrls']['publicIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                index += 1
+ 
+        ## Get External IP addresses from services
+        externalIPs = find_key_value_pairs(data['detail'], 'ipAddressV4')
+        
+        index = 0
+        if len(externalIPs) > 0:
+            for k, v in externalIPs:
+                if len(externalIPs) == 1:
+                    data['detail']['detectiveUrls']['externalIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                else:
+                    data['detail']['detectiveUrls']['externalIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                index += 1
 
         return_event['sourcetype'] = st
         return_event['event'] = data['detail']
