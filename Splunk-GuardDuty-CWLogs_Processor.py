@@ -40,6 +40,7 @@ import base64
 import boto3
 import json
 import sys
+import time
 
 IS_PY3 = sys.version_info[0] == 3
 
@@ -92,6 +93,10 @@ def processRecords(records):
         st = data['source'].replace(".", ":") + ":firehose"
         prefix_url='https://console.aws.amazon.com/detective/home?region='     
         data['detail']['detectiveUrls'] = {}
+        
+        ## Set ScopeStart and ScopeEnd url parameters
+        scopeStart = str(int(time.mktime(time.strptime(data['detail']['service']['eventFirstSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
+        scopeEnd = str(int(time.mktime(time.strptime(data['detail']['service']['eventLastSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
 
         ## Set Guard Duty Findings List to generate Guard Duty findings URL
         guard_duty_findings_list = ['CredentialAccess:IAMUser/AnomalousBehavior','DefenseEvasion:IAMUser/AnomalousBehavior','Discovery:IAMUser/AnomalousBehavior','Exfiltration:IAMUser/AnomalousBehavior'
@@ -110,16 +115,14 @@ def processRecords(records):
                                     ]
 
         if data['detail']['type'] in guard_duty_findings_list:
-            data['detail']['detectiveUrls']['guardDutyFindings'] = prefix_url+data['region']+'#findings/GuardDuty/'+data['detail']['id']
-        else: 
-            data['detail']['detectiveUrls']['guardDutyFindings'] = None
+            data['detail']['detectiveUrls']['guardDutyFindings'] = prefix_url+data['region']+'#findings/GuardDuty/'+data['detail']['id']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
 
         ## Generate IAM User URLs for resourceType Access Keys
         if data['detail']['resource']['resourceType'] == 'AccessKey':
-            data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']
+            data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
 
-        data['detail']['detectiveUrls']['ec2Instance']  = prefix_url+data['region']+'#entities/Ec2Instance/'+data['detail']['resource']['instanceDetails']['instanceId']
-        data['detail']['detectiveUrls']['awsAccount']  = prefix_url+data['region']+'#entities/AwsAccount/'+data['detail']['accountId']
+        data['detail']['detectiveUrls']['ec2Instance']  = prefix_url+data['region']+'#entities/Ec2Instance/'+data['detail']['resource']['instanceDetails']['instanceId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+        data['detail']['detectiveUrls']['awsAccount']  = prefix_url+data['region']+'#entities/AwsAccount/'+data['detail']['accountId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
 
         ## Get other recurring entities to form URLs
         ## Get private IP addresses from network interfaces
@@ -129,9 +132,9 @@ def processRecords(records):
         if len(privateIPs) > 0:
             for k, v in privateIPs:
                 if len(privateIPs) == 1:
-                    data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']
+                    data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 else:
-                    data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']
+                    data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 index += 1
         
         ## Get public IP addresses from network interfaces
@@ -141,9 +144,9 @@ def processRecords(records):
         if len(publicIPs) > 0:
             for k, v in publicIPs:
                 if len(publicIPs) == 1:
-                    data['detail']['detectiveUrls']['publicIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                    data['detail']['detectiveUrls']['publicIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 else:
-                    data['detail']['detectiveUrls']['publicIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                    data['detail']['detectiveUrls']['publicIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 index += 1
  
         ## Get External IP addresses from services
@@ -153,9 +156,9 @@ def processRecords(records):
         if len(externalIPs) > 0:
             for k, v in externalIPs:
                 if len(externalIPs) == 1:
-                    data['detail']['detectiveUrls']['externalIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                    data['detail']['detectiveUrls']['externalIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 else:
-                    data['detail']['detectiveUrls']['externalIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v
+                    data['detail']['detectiveUrls']['externalIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 index += 1
 
         return_event['sourcetype'] = st
