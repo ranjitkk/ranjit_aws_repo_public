@@ -41,6 +41,8 @@ import boto3
 import json
 import sys
 import time
+import datetime
+from datetime import timedelta
 
 IS_PY3 = sys.version_info[0] == 3
 
@@ -95,8 +97,17 @@ def processRecords(records):
         data['detail']['detectiveUrls'] = {}
         
         ## Set ScopeStart and ScopeEnd url parameters
-        scopeStart = str(int(time.mktime(time.strptime(data['detail']['service']['eventFirstSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
-        scopeEnd = str(int(time.mktime(time.strptime(data['detail']['service']['eventLastSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
+        scopeStartTimestamp = datetime.datetime.strptime(data['detail']['service']['eventFirstSeen'],"%Y-%m-%dT%H:%M:%SZ") 
+        scopeEndTimestamp = datetime.datetime.strptime(data['detail']['service']['eventLastSeen'],"%Y-%m-%dT%H:%M:%SZ")                 
+
+        scopeStartTimestamp = scopeStartTimestamp.replace(microsecond=0, second=0, minute=0)
+        scopeEndTimestamp = scopeEndTimestamp.replace(microsecond=0, second=0, minute=0) + timedelta(hours=1)
+
+        scopeStart = str((int(scopeStartTimestamp.timestamp())))+'000'
+        scopeEnd = str((int(scopeEndTimestamp.timestamp())))+'000'
+
+        #scopeStart = str(int(time.mktime(time.strptime(data['detail']['service']['eventFirstSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
+        #scopeEnd = str(int(time.mktime(time.strptime(data['detail']['service']['eventLastSeen'], "%Y-%m-%dT%H:%M:%SZ"))))
 
         ## Set Guard Duty Findings List to generate Guard Duty findings URL
         guard_duty_findings_list = ['CredentialAccess:IAMUser/AnomalousBehavior','DefenseEvasion:IAMUser/AnomalousBehavior','Discovery:IAMUser/AnomalousBehavior','Exfiltration:IAMUser/AnomalousBehavior'
@@ -119,61 +130,107 @@ def processRecords(records):
 
         ## Generate IAM User URLs for resourceType Access Keys
         if data['detail']['resource']['resourceType'] == 'AccessKey':
-            data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+            if data['detail']['resource']['accessKeyDetails']['userType'] == 'AssumedRole':
+                data['detail']['detectiveUrls']['AwsRoleSession']  = prefix_url+data['region']+'#entities/AwsRoleSession/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+            elif data['detail']['resource']['accessKeyDetails']['userType'] == 'Federated':
+                data['detail']['detectiveUrls']['FederatedUser']  = prefix_url+data['region']+'#entities/FederatedUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+            elif data['detail']['resource']['accessKeyDetails']['userType'] == 'Role':
+                data['detail']['detectiveUrls']['AwsRole']  = prefix_url+data['region']+'#entities/AwsRole/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+            else:      
+                data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
 
-        data['detail']['detectiveUrls']['ec2Instance']  = prefix_url+data['region']+'#entities/Ec2Instance/'+data['detail']['resource']['instanceDetails']['instanceId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
-        data['detail']['detectiveUrls']['awsAccount']  = prefix_url+data['region']+'#entities/AwsAccount/'+data['detail']['accountId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+            ## Get UserAgent url from services if available
+            userAgent = find_key_value_pairs(data['detail']['service'], 'fullUserAgent')
+            
+            index = 0
+            if len(userAgent) > 0:
+                for k, v in userAgent:
+                    if len(userAgent) == 1:
+                        data['detail']['detectiveUrls']['UserAgent']  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    else:
+                        data['detail']['detectiveUrls']['UserAgent'+str(index + 1)]  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    index += 1
 
-        ## Get other recurring entities to form URLs
+        if "accountId" in data['detail']:
+            data['detail']['detectiveUrls']['awsAccount']  = prefix_url+data['region']+'#entities/AwsAccount/'+data['detail']['accountId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+
+        ## Get EC2 Instance URLs
+        if "instanceDetails" in data['detail']['resource']:
+            data['detail']['detectiveUrls']['ec2Instance']  = prefix_url+data['region']+'#entities/Ec2Instance/'+data['detail']['resource']['instanceDetails']['instanceId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+        
+        ## Get nework intefaces info to form URLs
         ## Get private IP addresses from network interfaces
-        privateIPs = find_key_value_pairs(data['detail'], 'networkInterfaces')
-        
-        index = 0
-        if len(privateIPs) > 0:
-            for k, v in privateIPs:
-                if len(privateIPs) == 1:
-                    data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
-                else:
-                    data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
-                index += 1
-        
-        ## Get public IP addresses from network interfaces
-        publicIPs = find_key_value_pairs(data['detail'], 'publicIp')
-        
-        index = 0
-        if len(publicIPs) > 0:
-            for k, v in publicIPs:
-                if len(publicIPs) == 1:
-                    data['detail']['detectiveUrls']['publicIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
-                else:
-                    data['detail']['detectiveUrls']['publicIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
-                index += 1
+        if "networkInterfaces" in data['detail']['resource']['instanceDetails']:            
+            privateIPs = find_key_value_pairs(data['detail'], 'networkInterfaces')
+            
+            index = 0
+            if len(privateIPs) > 0:
+                for k, v in privateIPs:
+                    if len(privateIPs) == 1:
+                        data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    else:
+                        data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    index += 1
+            
+            ## Get public IP addresses from network interfaces
+            publicIPs = find_key_value_pairs(data['detail'], 'publicIp')
+            
+            index = 0
+            if len(publicIPs) > 0:
+                for k, v in publicIPs:
+                    if len(publicIPs) == 1:
+                        data['detail']['detectiveUrls']['publicIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    else:
+                        data['detail']['detectiveUrls']['publicIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    index += 1
  
         ## Get External IP addresses from services
-        externalIPs = find_key_value_pairs(data['detail'], 'ipAddressV4')
+        ## Get External local ip addresses
+        localIpAddress = find_key_value_pairs(data['detail'], 'localIpDetails')
         
         index = 0
-        if len(externalIPs) > 0:
-            for k, v in externalIPs:
-                if len(externalIPs) == 1:
-                    data['detail']['detectiveUrls']['externalIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+        if len(localIpAddress) > 0:
+            for k, v in localIpAddress:
+                if len(localIpAddress) == 1:
+                    data['detail']['detectiveUrls']['localIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v['ipAddressV4']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 else:
-                    data['detail']['detectiveUrls']['externalIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                    data['detail']['detectiveUrls']['localIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v['ipAddressV4']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                 index += 1
 
         return_event['sourcetype'] = st
         return_event['event'] = data['detail']
+
+        ## Get External Remote ip addresses
+        remoteIpAddress = find_key_value_pairs(data['detail'], 'remoteIpDetails')
+        
+        index = 0
+        if len(remoteIpAddress) > 0:
+            for k, v in remoteIpAddress:
+                if len(remoteIpAddress) == 1:
+                    data['detail']['detectiveUrls']['remoteIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v['ipAddressV4']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                else:
+                    data['detail']['detectiveUrls']['remoteIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v['ipAddressV4']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                index += 1
+
+        return_event['sourcetype'] = st
 
         if IS_PY3:
             # base64 encode api changes in python3 to operate exclusively on byte-like objects and bytes
             data = base64.b64encode(json.dumps(return_event).encode('utf-8')).decode()
         else:
             data = base64.b64encode(json.dumps(return_event))
-        yield {
-            'data': data,
-            'result': 'Ok',
-            'recordId': recId
-        }
+
+        if len(data) <= 600000:
+            yield {
+                'data': data,
+                'result': 'Ok',
+                'recordId': recId
+            }
+        else:
+            yield {
+                'result': 'ProcessingFailed',
+                'recordId': recId
+            }
 
 
 def putRecordsToFirehoseStream(streamName, records, client, attemptsMade, maxAttempts):
