@@ -88,8 +88,8 @@ def find_key_value_pairs(q, keys, dicts=None):
 def processRecords(records):
     for r in records:
         data = json.loads(base64.b64decode(r['data']))
-        print("Data in processRecords")
-        print(data)
+        #print("Data in processRecords")
+        #print(data)
         recId = r['recordId']
         return_event = {}
         st = data['source'].replace(".", ":") + ":firehose"
@@ -131,11 +131,11 @@ def processRecords(records):
         ## Generate IAM User URLs for resourceType Access Keys
         if data['detail']['resource']['resourceType'] == 'AccessKey':
             if data['detail']['resource']['accessKeyDetails']['userType'] == 'AssumedRole':
-                data['detail']['detectiveUrls']['AwsRoleSession']  = prefix_url+data['region']+'#entities/AwsRoleSession/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                data['detail']['detectiveUrls']['awsRoleSession']  = prefix_url+data['region']+'#entities/AwsRoleSession/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
             elif data['detail']['resource']['accessKeyDetails']['userType'] == 'Federated':
-                data['detail']['detectiveUrls']['FederatedUser']  = prefix_url+data['region']+'#entities/FederatedUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                data['detail']['detectiveUrls']['federatedUser']  = prefix_url+data['region']+'#entities/FederatedUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
             elif data['detail']['resource']['accessKeyDetails']['userType'] == 'Role':
-                data['detail']['detectiveUrls']['AwsRole']  = prefix_url+data['region']+'#entities/AwsRole/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                data['detail']['detectiveUrls']['awsRole']  = prefix_url+data['region']+'#entities/AwsRole/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
             else:      
                 data['detail']['detectiveUrls']['iamUser']  = prefix_url+data['region']+'#entities/AwsUser/'+data['detail']['resource']['accessKeyDetails']['principalId']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
 
@@ -146,9 +146,9 @@ def processRecords(records):
             if len(userAgent) > 0:
                 for k, v in userAgent:
                     if len(userAgent) == 1:
-                        data['detail']['detectiveUrls']['UserAgent']  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                        data['detail']['detectiveUrls']['userAgent']  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                     else:
-                        data['detail']['detectiveUrls']['UserAgent'+str(index + 1)]  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
+                        data['detail']['detectiveUrls']['userAgent'+str(index + 1)]  = prefix_url+data['region']+'#entities/UserAgent/'+v+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                     index += 1
 
         if "accountId" in data['detail']:
@@ -166,7 +166,7 @@ def processRecords(records):
             index = 0
             if len(privateIPs) > 0:
                 for k, v in privateIPs:
-                    if len(privateIPs) == 1:
+                    if (len(privateIPs) == 1 and len(v) == 1):
                         data['detail']['detectiveUrls']['privateIpAddress']  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
                     else:
                         data['detail']['detectiveUrls']['privateIpAddress'+str(index + 1)]  = prefix_url+data['region']+'#entities/IpAddress/'+v[index]['privateIpAddress']+'?scopeStart='+scopeStart+'&scopeEnd='+scopeEnd
