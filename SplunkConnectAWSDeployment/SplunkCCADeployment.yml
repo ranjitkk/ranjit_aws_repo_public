@@ -1,0 +1,387 @@
+Description:  This stack creates the required config for Splunk inputs for Splunk App for Amazon Connect
+
+Parameters:
+  SplunkHECEndpointUrl:
+    Description: Splunk HEC Endpoint Url
+    Type: String
+
+  SplunkHECToken:
+    Description: Splunk HEC Token
+    Type: String
+
+  AmazonConnectInstanceName:
+    Description: Name of the Connect instance     
+    Type: String
+ 
+  ConnectInstanceId:
+    Type: String
+    Description: UUID of the Connect instance    
+
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  FireHoseBackupS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'splunk-firehose-backup-s3bucket-${AWS::AccountId}'
+  
+  ConnectCTRKinesisFireHoseLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 30
+
+  ConnectCTRKinesisFireHoseLogStream: 
+    Type: AWS::Logs::LogStream
+    Properties: 
+      LogGroupName: !Ref ConnectCTRKinesisFireHoseLogGroup
+      LogStreamName: "splunkDelivery"
+
+  CloudWatchMetricKinesisFireHoseLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 30
+
+  CloudWatchMetricKinesisFireHoseLogStream: 
+    Type: AWS::Logs::LogStream
+    Properties: 
+      LogGroupName: !Ref CloudWatchMetricKinesisFireHoseLogGroup
+      LogStreamName: "splunkDelivery"
+
+  CloudWatchLogsKinesisFireHoseLogGroup: 
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      RetentionInDays: 30
+
+  CloudWatchLogsKinesisFireHoseLogStream: 
+    Type: AWS::Logs::LogStream
+    Properties: 
+      LogGroupName: !Ref CloudWatchLogsKinesisFireHoseLogGroup
+      LogStreamName: "splunkDelivery"
+
+
+  FireHoseRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - firehose.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: Kinesis-stream-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kinesis:DescribeStream"
+                  - "kinesis:GetShardIterator"
+                  - "kinesis:GetRecords"
+                  - "kinesis:ListShards"
+                Resource: 
+                  Fn::GetAtt:
+                    - "ConnectKinesisDataStream"
+                    - "Arn"
+        - PolicyName: s3-bucket-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:AbortMultipartUpload"
+                  - "s3:GetBucketLocation"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:ListBucketMultipartUploads"
+                  - "s3:PutObject"
+                Resource:
+                  - 'Fn::Join':
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref FireHoseBackupS3Bucket
+                  - 'Fn::Join':
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref FireHoseBackupS3Bucket
+                      - /*
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "kinesis:GetRecords"
+                  - "logs:PutLogEvents"
+                Resource: '*'
+        - PolicyName: lambda-execution-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - "lambda:InvokeFunction"
+                  - "lambda:GetFunctionConfiguration"
+                Resource: 
+                  - !GetAtt 'ConnectMetricsProcessor.Arn'
+                  - !GetAtt 'CloudWatchMetricsStreamProcessor.Arn'
+                  - !GetAtt 'CloudWatchLogsProcessor.Arn'                  
+
+  ConnectKinesisDataStream:
+    Type: 'AWS::Kinesis::Stream'
+    Properties:
+      ShardCount: 5
+
+  CloudWatchSubscriptionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                !Join
+                  - ''
+                  - - 'logs.'
+                    - !Ref "AWS::Region"
+                    - '.amazonaws.com'
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:              
+        - PolicyName: firehose-put-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "firehose:*"
+                Resource: 
+                  - !GetAtt 'CloudWatchLogsKinesisFireHose.Arn'
+          
+  ConnectCTRKinesisFireHose: 
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties: 
+        DeliveryStreamType: KinesisStreamAsSource
+        KinesisStreamSourceConfiguration: 
+            KinesisStreamARN:
+              Fn::GetAtt:
+                - "ConnectKinesisDataStream"
+                - "Arn"
+            RoleARN:
+              Fn::GetAtt:
+                - "FireHoseRole"
+                - "Arn"     
+        SplunkDestinationConfiguration:
+          CloudWatchLoggingOptions: 
+            Enabled: true
+            LogGroupName: !Ref ConnectCTRKinesisFireHoseLogGroup
+            LogStreamName: !Ref ConnectCTRKinesisFireHoseLogStream
+          HECEndpoint: !Ref SplunkHECEndpointUrl
+          HECEndpointType: "Raw"
+          HECToken: !Ref SplunkHECToken
+          S3BackupMode: "FailedEventsOnly"
+          S3Configuration:
+            BucketARN:
+              Fn::GetAtt:
+                - "FireHoseBackupS3Bucket"
+                - "Arn"            
+            RoleARN:
+              Fn::GetAtt:
+                - "FireHoseRole"
+                - "Arn" 
+
+  CloudWatchMetricKinesisFireHose: 
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamType: DirectPut
+      SplunkDestinationConfiguration:
+        CloudWatchLoggingOptions: 
+          Enabled: true
+          LogGroupName: !Ref CloudWatchMetricKinesisFireHoseLogGroup
+          LogStreamName: !Ref CloudWatchMetricKinesisFireHoseLogStream
+        HECEndpoint: !Ref SplunkHECEndpointUrl
+        HECEndpointType: "Event"
+        HECToken: !Ref SplunkHECToken
+        S3BackupMode: "FailedEventsOnly"
+        S3Configuration:
+          BucketARN:
+            Fn::GetAtt:
+              - "FireHoseBackupS3Bucket"
+              - "Arn"            
+          RoleARN:
+            Fn::GetAtt:
+              - "FireHoseRole"
+              - "Arn"           
+        ProcessingConfiguration:
+          Enabled: 'true'
+          Processors:
+            - Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt 'CloudWatchMetricsStreamProcessor.Arn'
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: 60                   
+                - ParameterName: BufferSizeInMBs 
+                  ParameterValue: 1
+                - ParameterName: RoleArn 
+                  ParameterValue: !GetAtt 'FireHoseRole.Arn'                   
+              Type: Lambda          
+
+  ConnectMetricsProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://splunk-quick-start/splunk-aws-connect-api-metrics-processor/MetricsProcessor/MetricsProcessor.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Description: Get Amazon Connect real-time and historic metric data from Connect REST endpoints
+      MemorySize: 128
+      Timeout: 60
+      Policies:
+      - AmazonConnect_FullAccess
+      - AWSLambda_FullAccess
+      - AmazonKinesisFullAccess
+      Events:
+        Schedule1:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+      Environment:
+        Variables:
+          CONNECT_INSTANCE_ID:
+            Ref: ConnectInstanceId
+          KINESIS_STREAM_NAME: !Ref ConnectKinesisDataStream
+ 
+  CloudWatchMetricsStreamProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://splunk-quick-start/SplunkAWSCloudWatchStreamingMetricsProcessor/CloudWatchMetricsStreamProcessor.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Description: Get CloudWatch Metrics for Amazon Connect Streamed to Splunk on Firehose
+      MemorySize: 128
+      Timeout: 60
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      Environment:
+        Variables:
+          SPLUNK_CLOUDWATCH_SOURCETYPE: aws:cloudwatch
+          METRICS_OUTPUT_FORMAT: json      
+
+  CloudWatchLogsProcessor:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://splunk-quick-start/SplunkAWSCloudWatchLogsProcessor/SplunkCloudWatchLogsProcessor.zip
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Description: Get CloudWatch Logs for Amazon Connect Streamed to Splunk on Firehose
+      MemorySize: 128
+      Timeout: 60
+      Policies:
+      - AWSLambdaBasicExecutionRole
+
+  CloudWatchLogsKinesisFireHose: 
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties: 
+      DeliveryStreamType: DirectPut
+      SplunkDestinationConfiguration:
+        CloudWatchLoggingOptions: 
+          Enabled: true
+          LogGroupName: !Ref CloudWatchLogsKinesisFireHoseLogGroup
+          LogStreamName: !Ref CloudWatchLogsKinesisFireHoseLogStream
+        HECEndpoint: !Ref SplunkHECEndpointUrl
+        HECEndpointType: "Raw"
+        HECToken: !Ref SplunkHECToken
+        S3BackupMode: "FailedEventsOnly"
+        S3Configuration:
+          BucketARN:
+            Fn::GetAtt:
+              - "FireHoseBackupS3Bucket"
+              - "Arn"            
+          RoleARN:
+            Fn::GetAtt:
+              - "FireHoseRole"
+              - "Arn"           
+        ProcessingConfiguration:
+          Enabled: 'true'
+          Processors:
+            - Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt 'CloudWatchLogsProcessor.Arn'
+                - ParameterName: BufferIntervalInSeconds
+                  ParameterValue: 60                   
+                - ParameterName: BufferSizeInMBs 
+                  ParameterValue: 1
+                - ParameterName: RoleArn 
+                  ParameterValue: !GetAtt 'FireHoseRole.Arn'                   
+              Type: Lambda            
+  
+  CloudWatchLogsSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties: 
+      RoleArn: 
+        Fn::GetAtt: 
+          - "CloudWatchSubscriptionRole"
+          - "Arn"
+      LogGroupName: 
+        !Join
+          - ''
+          - - '/aws/connect/'
+            - !Ref AmazonConnectInstanceName
+      FilterPattern: " "         
+      DestinationArn: 
+        Fn::GetAtt: 
+          - "CloudWatchLogsKinesisFireHose"
+          - "Arn"    
+
+  CloudWatchMetricsStreamRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - streams.metrics.cloudwatch.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: Kinesis-stream-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: "firehose:*"
+                Resource: 
+                  Fn::GetAtt:
+                    - "CloudWatchMetricKinesisFireHose"
+                    - "Arn"
+
+  CloudWatchMetricsStream:
+    Type: AWS::CloudWatch::MetricStream
+    Properties:
+      FirehoseArn: !GetAtt 'CloudWatchMetricKinesisFireHose.Arn'
+      OutputFormat: 'json'
+      RoleArn: !GetAtt 'CloudWatchMetricsStreamRole.Arn'
+      IncludeFilters:
+        - Namespace: AWS/Connect
+
+Outputs:
+
+  ConnectCTRKinesisFireHose:
+    Description: Kinesis FireHose Delivery Stream for Connect Events and CTR Records
+    Value: !Ref ConnectCTRKinesisFireHose     
+
+  CloudWatchMetricKinesisFireHose:
+    Description: Kinesis FireHose Delivery Stream for CloudWatch Metrics and Logs
+    Value: !Ref CloudWatchMetricKinesisFireHose    
+
+  ConnectKinesisDataStream:
+    Description: Kinesis Data Stream for Connect Events and CTR Records
+    Value: !Ref ConnectKinesisDataStream     
+
+  ConnectMetricsProcessor:
+    Description: Amazon Connect Metrics Process for Connect REST endpoints
+    Value: !Ref ConnectMetricsProcessor
