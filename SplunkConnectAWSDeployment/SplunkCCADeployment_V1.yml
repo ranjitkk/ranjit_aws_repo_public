@@ -17,15 +17,7 @@ Parameters:
     Type: String
     Description: UUID of the Connect instance    
 
-  QSS3BucketName:
-    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
-    Default: splunk-quick-start
-    Type: String
-  QSS3KeyPrefix:
-    AllowedPattern: ^[0-9a-zA-Z-/]*$
-    Default: SplunkConnectProcessors/
-    Type: String
-
+Transform: AWS::Serverless-2016-10-31
 Resources:
   FireHoseBackupS3Bucket:
     Type: AWS::S3::Bucket
@@ -65,106 +57,6 @@ Resources:
       LogGroupName: !Ref CloudWatchLogsKinesisFireHoseLogGroup
       LogStreamName: "splunkDelivery"
 
-  LambdaZipsBucket:
-    Type: AWS::S3::Bucket
-  CopyZips:
-    Type: Custom::CopyZips
-    Properties:
-      ServiceToken: !GetAtt 'CopyZipsFunction.Arn'
-      DestBucket: !Ref 'LambdaZipsBucket'
-      SourceBucket: !Ref 'QSS3BucketName'
-      Prefix: !Ref 'QSS3KeyPrefix'
-      Objects:
-        - MetricsProcessor/MetricsProcessor.zip
-        - CloudWatchMetricsStreamProcessor.zip
-        - SplunkCloudWatchLogsProcessor.zip
-  CopyZipsRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Path: /
-      Policies:
-        - PolicyName: lambda-copier
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - s3:GetObject
-                Resource:
-                  - !Sub 'arn:aws:s3:::${QSS3BucketName}/${QSS3KeyPrefix}*'
-              - Effect: Allow
-                Action:
-                  - s3:PutObject
-                  - s3:DeleteObject
-                Resource:
-                  - !Sub 'arn:aws:s3:::${LambdaZipsBucket}/${QSS3KeyPrefix}*'
-  CopyZipsFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      Description: Copies objects from a source S3 bucket to a destination
-      Handler: index.handler
-      Runtime: python3.7
-      Role: !GetAtt 'CopyZipsRole.Arn'
-      Timeout: 240
-      Code:
-        ZipFile: |
-          import json
-          import logging
-          import threading
-          import boto3
-          import cfnresponse
-          def copy_objects(source_bucket, dest_bucket, prefix, objects):
-              s3 = boto3.client('s3')
-              for o in objects:
-                  key = prefix + o
-                  copy_source = {
-                      'Bucket': source_bucket,
-                      'Key': key
-                  }
-                  print(('copy_source: %s' % copy_source))
-                  print(('dest_bucket = %s'%dest_bucket))
-                  print(('key = %s' %key))
-                  s3.copy_object(CopySource=copy_source, Bucket=dest_bucket,
-                        Key=key)
-          def delete_objects(bucket, prefix, objects):
-              s3 = boto3.client('s3')
-              objects = {'Objects': [{'Key': prefix + o} for o in objects]}
-              s3.delete_objects(Bucket=bucket, Delete=objects)
-          def timeout(event, context):
-              logging.error('Execution is about to time out, sending failure response to CloudFormation')
-              cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
-          def handler(event, context):
-              # make sure we send a failure to CloudFormation if the function
-              # is going to timeout
-              timer = threading.Timer((context.get_remaining_time_in_millis()
-                        / 1000.00) - 0.5, timeout, args=[event, context])
-              timer.start()
-              print(('Received event: %s' % json.dumps(event)))
-              status = cfnresponse.SUCCESS
-              try:
-                  source_bucket = event['ResourceProperties']['SourceBucket']
-                  dest_bucket = event['ResourceProperties']['DestBucket']
-                  prefix = event['ResourceProperties']['Prefix']
-                  objects = event['ResourceProperties']['Objects']
-                  if event['RequestType'] == 'Delete':
-                      delete_objects(dest_bucket, prefix, objects)
-                  else:
-                      copy_objects(source_bucket, dest_bucket, prefix, objects)
-              except Exception as e:
-                  logging.error('Exception: %s' % e, exc_info=True)
-                  status = cfnresponse.FAILED
-              finally:
-                  timer.cancel()
-                  cfnresponse.send(event, context, status, {}, None)
 
   FireHoseRole:
     Type: 'AWS::IAM::Role'
@@ -336,105 +228,57 @@ Resources:
                   ParameterValue: !GetAtt 'FireHoseRole.Arn'                   
               Type: Lambda          
 
-  ConnectMetricsProcessorRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-            - lambda.amazonaws.com
-          Action:
-          - sts:AssumeRole
-      Policies:
-        - PolicyName: lambda-cloudwatch
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-            - Effect: Allow
-              Action:
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              Resource: arn:aws:logs:*:*:*                
-
   ConnectMetricsProcessor:
-    Type: AWS::Lambda::Function
-    DependsOn: CopyZips
+    Type: AWS::Serverless::Function
     Properties:
-      Code:
-        S3Bucket: !Ref 'LambdaZipsBucket'
-        S3Key: !Sub '${QSS3KeyPrefix}MetricsProcessor/MetricsProcessor.zip'
+      CodeUri: s3://splunk-quick-start/splunk-aws-connect-api-metrics-processor/MetricsProcessor/MetricsProcessor.zip
       Handler: lambda_function.lambda_handler
       Runtime: python3.8
       Description: Get Amazon Connect real-time and historic metric data from Connect REST endpoints
       MemorySize: 128
       Timeout: 60
-      Role: !GetAtt 'ConnectMetricsProcessorRole.Arn'
+      Policies:
+      - AmazonConnect_FullAccess
+      - AWSLambda_FullAccess
+      - AmazonKinesisFullAccess
+      Events:
+        Schedule1:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
       Environment:
         Variables:
           CONNECT_INSTANCE_ID:
             Ref: ConnectInstanceId
           KINESIS_STREAM_NAME: !Ref ConnectKinesisDataStream
  
-  ConnectMetricsProcessorSchedule:
-    Type: AWS::Events::Rule
-    Properties: 
-      Description: "ConnectMetricsProcessorSchedule"
-      ScheduleExpression: "rate(1 minute)"
-      State: "ENABLED"
-      Targets: 
-        - 
-          Arn: 
-            Fn::GetAtt: 
-              - "ConnectMetricsProcessor"
-              - "Arn"
-          Id: "ConnectMetricsProcessor"  
-
-  PermissionForEventsToInvokeLambda: 
-    Type: AWS::Lambda::Permission
-    Properties: 
-      FunctionName: !Ref "ConnectMetricsProcessor"
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
-      SourceArn: 
-        Fn::GetAtt: 
-          - "ConnectMetricsProcessorSchedule"
-          - "Arn"
-
   CloudWatchMetricsStreamProcessor:
-    Type: AWS::Lambda::Function
-    DependsOn: CopyZips
+    Type: AWS::Serverless::Function
     Properties:
-      Code:
-        S3Bucket: !Ref 'LambdaZipsBucket'
-        S3Key: !Sub '${QSS3KeyPrefix}CloudWatchMetricsStreamProcessor.zip'    
+      CodeUri: s3://splunk-quick-start/SplunkAWSCloudWatchStreamingMetricsProcessor/CloudWatchMetricsStreamProcessor.zip
       Handler: lambda_function.lambda_handler
       Runtime: python3.8
       Description: Get CloudWatch Metrics for Amazon Connect Streamed to Splunk on Firehose
       MemorySize: 128
       Timeout: 60
-      Role: !GetAtt 'ConnectMetricsProcessorRole.Arn'
+      Policies:
+      - AWSLambdaBasicExecutionRole
       Environment:
         Variables:
           SPLUNK_CLOUDWATCH_SOURCETYPE: aws:cloudwatch
           METRICS_OUTPUT_FORMAT: json      
 
   CloudWatchLogsProcessor:
-    Type: AWS::Lambda::Function
-    DependsOn: CopyZips
+    Type: AWS::Serverless::Function
     Properties:
-      Code:
-        S3Bucket: !Ref 'LambdaZipsBucket'
-        S3Key: !Sub '${QSS3KeyPrefix}SplunkCloudWatchLogsProcessor.zip'       
+      CodeUri: s3://splunk-quick-start/SplunkAWSCloudWatchLogsProcessor/SplunkCloudWatchLogsProcessor.zip
       Handler: lambda_function.lambda_handler
       Runtime: python3.8
       Description: Get CloudWatch Logs for Amazon Connect Streamed to Splunk on Firehose
       MemorySize: 128
       Timeout: 60
-      Role: !GetAtt 'ConnectMetricsProcessorRole.Arn'
+      Policies:
+      - AWSLambdaBasicExecutionRole
 
   CloudWatchLogsKinesisFireHose: 
     Type: AWS::KinesisFirehose::DeliveryStream
