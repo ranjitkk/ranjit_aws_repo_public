@@ -1,0 +1,648 @@
+Parameters:
+  StreamName:
+    AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
+    Default: Okta-OCSF-FHStream
+    Type: String
+  GlueDatabaseName:
+    Type: String
+    Default: "okta_ocsf"
+    Description: "Name of the AWS Glue database for OCSF database"
+  GlueTableName:
+    Type: String
+    MinLength: "4"
+    Default: "okta_ocsf"
+    Description: "Name of the AWS Glue database for OCSF database"
+  PartnerEventBus:
+    Description: Name of Okta's PArtner Event bus
+    Type: String
+
+Resources:
+  # Create Event Rule
+  myeventrule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Okta SysLog event
+      EventBusName: !Ref PartnerEventBus
+      EventPattern:
+         {
+            "detail": {
+              "displayMessage": [ {
+                "prefix": "Authentication of user"
+              }]
+            }
+          }
+      Name: myeventrule
+      State: ENABLED
+
+      Targets:
+        - Arn: !GetAtt
+            - DeliveryStream
+            - Arn
+          RoleArn: !GetAtt
+            - EventBusRole
+            - Arn
+          Id: "myeventruleid"
+        #Create AWS Lambd Role TODO: Role is wide open
+  Lambdarole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+            - sts:AssumeRole
+        Policies:
+          - PolicyName: lambda-cloudwatch
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+              - Effect: Allow
+                Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:*:*:*
+          - PolicyName: flow-logs-policy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+              - Effect: Allow
+                Action:
+                - '*'
+                Resource: '*'
+  # CloudFormation creates a lambda function named <CloudFormationStackName-ResourceName-RandomChars>
+  # Example: CreateLambdaFunction-TestLambdaFunction-N7S3FMXJ8Z8R
+  TestLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: aws:states:opt-in
+      Code:
+        ZipFile: |
+          import base64
+          import json
+          def lambda_handler(event, context):
+              """Sample pure Lambda function
+              Parameters
+              ----------
+              event: dict, required
+                  API Gateway Lambda Proxy Input Format
+                  Event doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#api-gateway-simple-proxy-for-lambda-input-format
+              context: object, required
+                  Lambda Context runtime methods and attributes
+                  Context doc: https://docs.aws.amazon.com/lambda/latest/dg/python-context-object.html
+              Returns
+              ------
+              API Gateway Lambda Proxy Output Format: dict
+                  Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
+              """
+              # try:
+              #     ip = requests.get("http://checkip.amazonaws.com/")
+              # except requests.RequestException as e:
+              #     # Send some context about this error to Lambda Logs
+              #     print(e)
+              #     raise e
+              output=[]
+              for record in event['records']:
+                  recordId = record['recordId']
+                  data = base64.b64decode(record['data'])
+                  data = json.loads(data.decode('utf8'))
+                  #Base 64 encoded strings
+                  #data = [['tom', 10], ['nick', 15], ['juli', 14]]
+                  result=tranform_data(data)
+                  #result = output1.to_json(orient="split")
+                  #print('typeeeeeeee')
+                  print(type(output))
+                  partition_keys = get_partition_keys(data)
+                  output_record = {
+                      'recordId': record['recordId'], # is this the problem? I used sequenceNumber, it is not right.
+                      'result': 'Ok',
+                      'data': base64.b64encode(json.dumps(result, separators=(',', ':')).encode('utf-8') + b'\n').decode(
+                          'utf-8'),
+                      'metadata': { 'partitionKeys': partition_keys }                
+                  }
+                  output.append(output_record)
+              print(output)
+              return {'records': output}
+              #return {'records': output}
+              '''
+              bytes_encoded = bytes_encoded.encode(encoding='utf-8')
+              print(bytes_encoded)
+              #data=recordId.decode()
+              str_decoded = bytes_encoded.decode()
+              print(str_decoded)
+              str_decoded = bytes_encoded.decode()
+              print(type(str_decoded))
+              return {
+              "statusCode": 200,
+              "body": json.dumps({
+                  "message": "hello world"
+                  # "location": ip.text.replace("\n", "")
+              })
+              }'''
+          def get_partition_keys(data):
+              event_time = data['detail']['published']
+              partition_key = {}
+              partition_key['source'] = data['source'].split('/')[3]
+              partition_key['AWS_account'] = data['account']
+              partition_key['region'] = data['region']
+              partition_key['eventhour'] = event_time.split('-')[0]+event_time.split('-')[1]+event_time.split('-')[2][0:2]+event_time.split('-')[2][3:5]
+              return partition_key
+
+          def get_activity_details(activityInfo):
+              activity = "Unknown"
+              activity_id = 0
+              if "user.authentication" in activityInfo:
+                  print('inside activity')
+                  activity='Logon'
+                  activity_id=1
+              return activity,activity_id
+          def get_auth_protocol(authProviderDetail):
+              auth_protocol = "Unknown"
+              auth_protocol_id = 0
+              if "FACTOR" in authProviderDetail:
+                  print('inside auth protocol')
+                  auth_protocol = "Other  / MFA"
+                  auth_protocol_id = 1
+              return auth_protocol,auth_protocol_id
+          def get_category():
+              category_name='Audit Activity events'
+              category_uid=3
+              return category_name,category_uid
+          def get_class():
+              class_name="Authentication Audit"
+              class_uid= 3002
+              return class_name,class_uid
+          def get_clearText_value(auth_protocol):
+              is_clearText=False
+              if ((auth_protocol!='FTP') and (auth_protocol!='TELNET')):
+                  is_clearText==True
+              return is_clearText
+          def get_destination_endPoint(destination_endpoint):
+              detination_details={"hostname":destination_endpoint['requestUri'],
+              "ip":"",
+              "instance_uid":"",
+              "interface_id":"",
+              "svc_name":destination_endpoint['url']}
+              return detination_details
+          def get_logon_type(login_transaction):
+              logon_type=login_transaction['type']
+              logon_type_id=0
+              if "WEB" in logon_type:
+                  logon_type_id=-1
+              return  logon_type,logon_type_id
+          def get_severity(severity):
+              severity_id = -1
+              if "INFO" in severity:
+                  severity_id=1
+              return  severity,severity_id
+          def get_src_endpoint(data):
+              src_end_point={
+              "hostname": data['debugContext']['debugData']['requestUri'],
+              "ip ": data['client']['ipAddress'],
+              "interface_id": data['client']['device']
+              }
+              return src_end_point
+          def get_src_user(data):
+              src_user={
+                  'type':data['actor']['type'],
+                  'displayname':data['actor']['displayName'],
+                  'alternateID':data['actor']['alternateId']
+              }
+              return src_user
+          def get_status_details(data):
+              status=data['outcome']['result']
+              status_code	='N/A'
+              status_detail=''
+              status_id=-1
+              if "SUCCESS" in status:
+                  status_detail="LOGON_USER_INITIATED"
+                  status_id=1
+              return status,status_code,status_detail,status_id
+          def tranform_data(data):
+              #get activity
+              activity,activity_id=get_activity_details(data['detail']['eventType'])
+              auth_protocol,auth_protocol_id=get_auth_protocol(data['detail']['authenticationContext']['authenticationProvider'])
+              category_name,category_uid=get_category()
+              class_name,class_uid=get_class()
+              is_cleartext=get_clearText_value(auth_protocol)
+              dst_endpoint=get_destination_endPoint(data['detail']['debugContext']['debugData'])
+              dst_user=data['detail']['actor']['alternateId']
+              enrichments=data['detail']['target']
+              _time=data['time']
+              logon_type,logon_type_id=get_logon_type(data['detail']['transaction'])
+              displayMessage=data['detail']['displayMessage']
+              ref_time=data['time']
+              profile=data['detail']['actor']['alternateId']
+              session_uid=data['detail']['authenticationContext']['externalSessionId']
+              severity,severity_id=get_severity(data['detail']['severity'])
+              src_endpoint=get_src_endpoint(data['detail'])
+              src_user=get_src_user(data['detail'])
+              status,status_code,status_detail,status_id = get_status_details(data['detail'])
+              type_uid='300201' #HardCoded
+              type_name='Authentication Audit: Logon'
+              json_data={
+                  'activity':activity,
+                  'activity_id':activity_id,
+                  'auth_protocol':auth_protocol,
+                  'auth_protocol_id':auth_protocol_id,
+                  'category_name':category_name,
+                  'category_uid':category_uid,
+                  'class_name':class_name,
+                  'class_uid':class_uid,
+                  'is_cleartext':is_cleartext,
+                  'dst_endpoint':dst_endpoint,
+                  'dst_user':dst_user,
+                  'enrichments':enrichments,
+                  '_time':_time,
+                  'logon_type':logon_type,
+                  'logon_type_id':logon_type_id,
+                  'displayMessage':displayMessage,
+                  'ref_time':ref_time,
+                  'profile':profile,
+                  'session_uid':session_uid,
+                  'severity':severity,
+                  'severity_id':severity_id,
+                  'src_endpoint':src_endpoint,
+                  'src_user':src_user,
+                  'status':status,
+                  'status_code':status_code,
+                  'status_detail':status_detail,
+                  'status_id':status_id,
+                  'type_uid':type_uid,
+                  'type_name':type_name
+              }
+              '''data=[[activity,activity_id,auth_protocol,auth_protocol_id,category_name,category_uid,class_name,class_uid,is_cleartext,destination_endpoint,dst_user,enrichments,_time,logon_type,
+                    logon_type_id,displayMessage,ref_time,profile,session_uid,severity,severity_id,src_endpoint,src_user,status,status_code,
+                    status_detail,status_id,type_uid,type_name]]
+              # data = [['tom', 10], ['nick', 15], ['juli', 14]]
+              #get
+              df = pd.DataFrame(data, columns=['activity','activity_id','auth_protocol','auth_protocol_id','category_name','category_uid','class_name','class_uid','is_cleartext','dst_endpoint',
+                                              'dst_user','enrichments','_time','logon_type','logon_type_id','displayMessage','ref_time','profile','session_uid','severity','severity_id',
+                                              'src_endpoint','src_user','status','status_code','status_detail','status_id','type_uid','type_name'])
+              '''
+              #df.to_csv("data.csv")
+              #df.to_csv("/tmp/data.csv", index=False,sep='\t', encoding='utf-8')
+              '''output=[]
+              output_record = {
+                  'result': 'Ok',
+                  'data': data
+              }
+              output.append(output_record)'''
+              return json_data
+              #return "data"
+
+      Handler: index.lambda_handler
+      Role: !GetAtt Lambdarole.Arn
+      Runtime: python3.8
+      Timeout: 120
+      MemorySize: 128
+
+  #Creating AWS Glue Catalog
+
+  OCSFOktaDatabase:
+    Type: "AWS::Glue::Database"
+    Properties:
+      DatabaseInput:
+        Description: "Cloudformation for Glue database"
+        Name: !Ref GlueDatabaseName
+      CatalogId: !Ref AWS::AccountId
+  
+  MyS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'access-logs-parquet-${AWS::Region}-${AWS::AccountId}'
+      AccessControl: Private
+
+  OCSFSchemaTable:
+    Type: "AWS::Glue::Table"
+    DependsOn: OCSFOktaDatabase
+    Properties:
+      TableInput:
+        Description: "OCSF Schema Name"
+        TableType: "EXTERNAL_TABLE"
+        Parameters: {
+          "classification": "json",
+          "CrawlerSchemaDeserializerVersion": "1.0",
+          "CrawlerSchemaSerializerVersion": "1.0",
+          "averageRecordSize": "1465",
+          "compressionType": "none",
+          "objectCount": "1",
+          "recordCount": "2",
+          "sizeKey": "2930",
+          "typeOfData": "file"
+        }
+        StorageDescriptor:
+          StoredAsSubDirectories: False
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          Compressed: "false"
+          Columns:
+            - Type: string
+              Name: activity
+            - Type: string
+              Name: activity_id
+            - Type: string
+              Name: auth_protocol
+            - Type: bigint
+              Name: auth_protocol_id
+            - Type: string
+              Name: category_name
+            - Type: bigint
+              Name: category_uid
+            - Type: string
+              Name: class_name
+            - Type: bigint
+              Name: class_uid
+            - Type: boolean
+              Name: is_cleartext
+            - Type: struct<hostname:string,ip:string,instance_uid:string,interface_id:string,svc_name:string>
+              Name: dst_endpoint
+            - Type: string
+              Name: dst_user
+            - Type: array<struct<id:string,type:string,alternateId:string,displayName:string,detailEntry:struct<methodTypeUsed:string,methodUsedVerifiedProperties:string>>>
+              Name: enrichments
+            - Type: string
+              Name: _time
+            - Type: string
+              Name: logon_type
+            - Type: bigint
+              Name: logon_type_id
+            - Type: string
+              Name: displaymessage
+            - Type: string
+              Name: ref_time
+            - Type: string
+              Name: profile
+            - Type: string
+              Name: session_uid
+            - Type: string
+              Name: severity
+            - Type: bigint
+              Name: severity_id
+            - Type: struct<hostname:string,ip:string,interface_id:string>
+              Name: src_endpoint
+            - Type: struct<type:string,displayname:string,alternateID:string>
+              Name: src_user
+            - Type: string
+              Name: status
+            - Type: string
+              Name: status_code
+            - Type: string
+              Name: status_detail
+            - Type: bigint
+              Name: status_id
+            - Type: bigint
+              Name: type_uid
+            - Type: string
+              Name: type_name
+            - Type: string
+              Name: partition_0
+          SerdeInfo:
+            Parameters: {
+              "field.delim": ",",
+              "paths": "_time,activity,activity_id,auth_protocol,auth_protocol_id,category_name,category_uid,class_name,class_uid,displayMessage,dst_endpoint,dst_user,enrichments,is_cleartext,logon_type,logon_type_id,profile,ref_time,session_uid,severity,severity_id,src_endpoint,src_user,status,status_code,status_detail,status_id,type_name,type_uid"
+            }
+            SerializationLibrary: "org.openx.data.jsonserde.JsonSerDe"
+          Location: !Sub "s3://${MyS3Bucket}"
+
+        Name: !Ref GlueTableName
+      DatabaseName: !Ref GlueDatabaseName
+      CatalogId: !Ref AWS::AccountId
+
+  #Create AWS Firehose Artifact
+  DeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Ref StreamName
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !Sub 'arn:aws:s3:::${MyS3Bucket}'
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 128
+        RoleARN: !GetAtt DeliveryRole.Arn
+        Prefix: sourcelocation=!{partitionKeyFromLambda:source}/region=!{partitionKeyFromLambda:region}/AWS_account=!{partitionKeyFromLambda:AWS_account}/eventhour=!{partitionKeyFromLambda:eventhour}/
+        ErrorOutputPrefix: okta-ocsf-error
+        DynamicPartitioningConfiguration:
+          Enabled: true
+        DataFormatConversionConfiguration:
+          Enabled: true
+          InputFormatConfiguration:
+            Deserializer:
+              OpenXJsonSerDe : {}
+          OutputFormatConfiguration :
+            Serializer:
+              ParquetSerDe: {}
+          SchemaConfiguration :
+            CatalogId: !Ref AWS::AccountId
+            RoleARN: !GetAtt DeliveryRole.Arn
+            DatabaseName: !Ref OCSFOktaDatabase
+            TableName: !Ref OCSFSchemaTable
+            Region: !Ref AWS::Region
+            VersionId: LATEST
+        ProcessingConfiguration:
+          Enabled: true
+          Processors:
+            - Parameters:
+                - ParameterName: LambdaArn
+                  ParameterValue: !GetAtt TestLambdaFunction.Arn
+              Type: Lambda
+
+  DeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref 'AWS::AccountId'
+      Path: "/"
+      Policies:
+        - PolicyName: firehose_delivery_policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:AbortMultipartUpload'
+                  - 's3:GetBucketLocation'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:ListBucketMultipartUploads'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref MyS3Bucket
+                  - !Join
+                    - ''
+                    - - 'arn:aws:s3:::'
+                      - !Ref MyS3Bucket
+                      - '/*'
+              - Effect: Allow
+                Action:
+                  - 'glue:GetTableVersions'
+                  - 'glue:GetTableVersion'
+                  - 'glue:GetTableVersions'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:glue:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':catalog'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:glue:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':database/'
+                      -  !Ref OCSFOktaDatabase
+                  - !Join
+                    - ''
+                    - - 'arn:aws:glue:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':table/'
+                      - !Ref OCSFOktaDatabase
+                      -  '/'
+                      -  !Ref OCSFSchemaTable
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:GetFunctionConfiguration'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:lambda:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':function:'
+                      - !Ref TestLambdaFunction
+              - Effect: Allow
+                Action:
+                  - 'kms:GenerateDataKey'
+                  - 'kms:Decrypt'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:kms:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':key/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'kinesis.${AWS::Region}.amazonaws.com'
+                  StringLike:
+                    'kms:EncryptionContext:aws:s3:arn':
+                      - 'arn:aws:s3:::%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%/*'
+                      - 'arn:aws:s3:::%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+              - Effect: Allow
+                Action: 'logs:PutLogEvents'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':log-group:/aws/kinesisfirehose/'
+                      - !Ref StreamName
+                      - ':'
+                      - ':log-stream:*'
+                  - !Join
+                    - ''
+                    - - 'arn:aws:logs:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':log-group:%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%:log-stream:*'
+              - Effect: Allow
+                Action:
+                  - 'kinesis:DescribeStream'
+                  - 'kinesis:GetShardIterator'
+                  - 'kinesis:GetRecords'
+                  - 'kinesis:ListShards'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:kinesis:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':stream/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+              - Effect: Allow
+                Action: 'kms:Decrypt'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:kms:'
+                      - !Ref 'AWS::Region'
+                      - ':'
+                      - !Ref 'AWS::AccountId'
+                      - ':key/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'kinesis.${AWS::Region}.amazonaws.com'
+                  StringLike:
+                    'kms:EncryptionContext:aws:s3:arn':
+                      - 'arn:aws:kinesis:::%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%/*'
+  EventBusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: "/"
+      Policies:
+        - PolicyName: firehose_delivery_policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'firehose:PutRecord'
+                  - 'firehose:PutRecordBatch'
+                Resource:
+                  - !Join
+                    - ''
+                    - - 'arn:aws:firehose:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':deliverystream/'
+                      - !Ref StreamName
+Outputs:
+   KinesisFirehose:
+     Description: Kinesis Firehose Name
+     Value: !Ref DeliveryStream
+   S3bucketname: 
+     Value: !Ref MyS3Bucket
+     Description: Name of the bucket created
+   GlueDatabase: 
+     Value: !Ref OCSFOktaDatabase
+     Description: AWS Glue Database
+   GlueTable: 
+     Value: !Ref OCSFSchemaTable
+     Description: AWS Glue Table
