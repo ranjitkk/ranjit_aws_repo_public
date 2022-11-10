@@ -1,7 +1,7 @@
 Parameters:
   StreamName:
     AllowedPattern: ^[0-9a-zA-Z]+([0-9a-zA-Z-]*[0-9a-zA-Z])*$
-    Default: Okta-OCSF-FHStream
+    Default: LogsOkta
     Type: String
   GlueDatabaseName:
     Type: String
@@ -83,218 +83,374 @@ Resources:
       Code:
         ZipFile: |
           import base64
+          from datetime import datetime
           import json
+
           def lambda_handler(event, context):
-              """Sample pure Lambda function
+              """
+              Purpose of this Lambda function is to provide a general guidance on converting Okta syslogs into OCSF format.
+              This Lambda function ONLY CONSIDERS : SUCCESSFUL AUTHENTICATION EVENT FROM OKTA SYS LOG
+              For different syslog event categories lambda should be enhanced/modified as per the OCSF schema and Sys Log event attributes
               Parameters
               ----------
-              event: dict, required
-                  API Gateway Lambda Proxy Input Format
-                  Event doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#api-gateway-simple-proxy-for-lambda-input-format
-              context: object, required
-                  Lambda Context runtime methods and attributes
-                  Context doc: https://docs.aws.amazon.com/lambda/latest/dg/python-context-object.html
+              event: event Object represents Okta SysLog event
+
+                  Event doc: https://developer.okta.com/docs/reference/api/system-log/#example-logevent-object
+
               Returns
               ------
-              API Gateway Lambda Proxy Output Format: dict
-                  Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
+              Output Format: Returning Okta Sys log event into an OCSF JSON format
+
+                  To Understand OCSF Data Format: https://schema.ocsf.io/classes/authentication?extensions=
               """
-              # try:
-              #     ip = requests.get("http://checkip.amazonaws.com/")
-              # except requests.RequestException as e:
-              #     # Send some context about this error to Lambda Logs
-              #     print(e)
-              #     raise e
-              output=[]
+              output = []
+              # Access Record Data from Syslog event
               for record in event['records']:
-                  recordId = record['recordId']
                   data = base64.b64decode(record['data'])
                   data = json.loads(data.decode('utf8'))
-                  #Base 64 encoded strings
-                  #data = [['tom', 10], ['nick', 15], ['juli', 14]]
-                  result=tranform_data(data)
-                  #result = output1.to_json(orient="split")
-                  #print('typeeeeeeee')
-                  print(type(output))
-                  partition_keys = get_partition_keys(data)
+                  # Invoke Transform Data to perform OCSF conversion
+                  result = tranform_data(data)
+                  # Add Dynamic Partioning for S3 buckets
+                  format="%Y-%m-%dT%H:%M:%S.%fZ"
+                  date_input=data['detail']['published']
+                  print('date_inputdate_inputdate_inputdate_input')
+                  print(type(date_input))
+                  print(date_input)
+
+
+                  datetime1 = datetime.strptime(date_input, format)
+                  partitionKeys = {}
+                  partitionKeys["source"] = 'OktaEventSource'
+                  partitionKeys["region"] = context.invoked_function_arn.split(":")[3]
+                  partitionKeys["AWS_account"] = context.invoked_function_arn.split(":")[4]
+                  partitionKeys["eventhour"] = datetime1.strftime("%Y%m%d%H")
+
+                  # Reformats the output in a base64 encoded format.OCSF JSON Output will be used by Firehose datastream and AWS Glue Schema
                   output_record = {
-                      'recordId': record['recordId'], # is this the problem? I used sequenceNumber, it is not right.
+                      'recordId': record['recordId'],  # is this the problem? I used sequenceNumber, it is not right.
                       'result': 'Ok',
                       'data': base64.b64encode(json.dumps(result, separators=(',', ':')).encode('utf-8') + b'\n').decode(
                           'utf-8'),
-                      'metadata': { 'partitionKeys': partition_keys }                
+                      'metadata': { 'partitionKeys': partitionKeys }
                   }
                   output.append(output_record)
+              print("JSON Output base64 Encoded format:")
               print(output)
               return {'records': output}
-              #return {'records': output}
-              '''
-              bytes_encoded = bytes_encoded.encode(encoding='utf-8')
-              print(bytes_encoded)
-              #data=recordId.decode()
-              str_decoded = bytes_encoded.decode()
-              print(str_decoded)
-              str_decoded = bytes_encoded.decode()
-              print(type(str_decoded))
-              return {
-              "statusCode": 200,
-              "body": json.dumps({
-                  "message": "hello world"
-                  # "location": ip.text.replace("\n", "")
-              })
-              }'''
-          def get_partition_keys(data):
-              event_time = data['detail']['published']
-              partition_key = {}
-              partition_key['source'] = data['source'].split('/')[3]
-              partition_key['AWS_account'] = data['account']
-              partition_key['region'] = data['region']
-              partition_key['eventhour'] = event_time.split('-')[0]+event_time.split('-')[1]+event_time.split('-')[2][0:2]+event_time.split('-')[2][3:5]
-              return partition_key
+
 
           def get_activity_details(activityInfo):
+              """
+              Function captures an Activity Name that is logged by Okta Syslog
+              Parameters
+              ----------
+              activityInfo: Activity Info captured by Okta system Log
+
+              Returns
+              ------
+              activity: Name of the activity
+              activity_id: Identifier for the activity
+              """
+              # Based on the OCSF schema definition, Successful Athentication is described as "unknown"
+              #Activity Value will change based on a type of event you want to capture
               activity = "Unknown"
+              #Use Activity ID associated with an activity
               activity_id = 0
+              # Check if User Authentication is part of the activity Info
               if "user.authentication" in activityInfo:
-                  print('inside activity')
-                  activity='Logon'
-                  activity_id=1
-              return activity,activity_id
-          def get_auth_protocol(authProviderDetail):
+                  activity = 'Logon'
+                  activity_id = 1
+              return activity, activity_id
+
+
+          def get_auth_protocol(auth_provider_detail):
+              """
+              Function captures an authentication protocol reported by the event source.
+              Parameters
+              ----------
+              auth_provider_detail: Contains the identity of an actor using the credentials provided to it
+
+              Returns
+              ------
+              auth_protocol: Name of the activity
+              auth_protocol: Identifier for the activity
+              """
               auth_protocol = "Unknown"
               auth_protocol_id = 0
-              if "FACTOR" in authProviderDetail:
-                  print('inside auth protocol')
+              # Check if FACTOR is part of the activity Info
+              # this can be extended to various scenarios and use cases
+              if "FACTOR" in auth_provider_detail:
                   auth_protocol = "Other  / MFA"
                   auth_protocol_id = 1
-              return auth_protocol,auth_protocol_id
-          def get_category():
-              category_name='Audit Activity events'
-              category_uid=3
-              return category_name,category_uid
+              return auth_protocol, auth_protocol_id
+
+
+          def get_audit_category(eventType):
+              """
+              Function captures the event category name for an event logged by Okta
+              get_audit_category function is dedicated for all the Audit Activity Events
+              This function can be be enhanced as more events are included
+              Returns
+              ------
+              category_name: Name of the event category
+              category_uid: Category unique identifier for the activity
+              """
+              #The event category name, for Successful Authentication , category name and category_uid are selected based on the OCSF schema
+              category_name= "Unknown"
+              category_uid= 0
+              if "user.authentication" in eventType:
+                  category_name = 'Audit Activity events'
+                  category_uid = 3
+              return category_name, category_uid
+
+
           def get_class():
-              class_name="Authentication Audit"
-              class_uid= 3002
-              return class_name,class_uid
-          def get_clearText_value(auth_protocol):
-              is_clearText=False
-              if ((auth_protocol!='FTP') and (auth_protocol!='TELNET')):
-                  is_clearText==True
+              """
+              Function captures an event class
+
+              Returns
+              ------
+              class_name: Name of the event class
+              class_uid: Class unique identifier for the activity
+              """
+              class_name = "Authentication Audit"
+              class_uid = 3002
+              return class_name, class_uid
+
+
+          def get_clear_text_value(auth_protocol):
+              """
+              Function checks if credentials were passed in clear text.
+              Parameters
+              ----------
+              auth_protocol: Contains the metadata about the authentication
+              Returns
+              ------
+              is_clearText: Returns the boolean value
+              """
+              is_clearText = False
+              # check if protocol is wither FTP or Telnet
+              if ((auth_protocol != 'FTP') and (auth_protocol != 'TELNET')):
+                  is_clearText == True
               return is_clearText
-          def get_destination_endPoint(destination_endpoint):
-              detination_details={"hostname":destination_endpoint['requestUri'],
-              "ip":"",
-              "instance_uid":"",
-              "interface_id":"",
-              "svc_name":destination_endpoint['url']}
+
+
+          def get_destination_endpoint(destination_endpoint):
+              """
+              Function find the endpoint for which Authn was targeted
+              Parameters
+              ----------
+              destination_endpoint: Contains the metadata about the endpoint for which AuthN was targeted
+
+              Returns
+              ------
+              detination_details: Returns the destination endpoint
+              """
+              #Create a JSON object in OCSF format
+              detination_details = {"hostname": destination_endpoint['requestUri'],
+                                    "ip": "",
+                                    "instance_uid": "",
+                                    "interface_id": "",
+                                    "svc_name": destination_endpoint['url']}
               return detination_details
+
+
           def get_logon_type(login_transaction):
-              logon_type=login_transaction['type']
-              logon_type_id=0
+              """
+              Function find the type of the login based on the event source
+              Parameters
+              ----------
+              login_transaction: Contains the metadata about the endpoint for which AuthN was targeted
+
+              Returns
+              ------
+              logon_type: Returns the boolean value based on the event
+              logon_type_id: Returns the logon id
+              """
+              #Capture the login transaction
+              logon_type = login_transaction['type']
+              logon_type_id = 0
+              # If WEB is not in logon_type return a normalized value
               if "WEB" in logon_type:
-                  logon_type_id=-1
-              return  logon_type,logon_type_id
+                  logon_type_id = -1
+              return logon_type, logon_type_id
+
+
           def get_severity(severity):
+              """
+              Function to find the log severity
+              Parameters
+              ----------
+              severity: Details about the event severity
+
+              Returns
+              ------
+              severity: Returns the event severity
+              severity_id: Returns event severity  id
+              """
               severity_id = -1
+              # If the event severity is INFO assign value as 1
               if "INFO" in severity:
-                  severity_id=1
-              return  severity,severity_id
+                  severity_id = 1
+              return severity, severity_id
+
+
           def get_src_endpoint(data):
-              src_end_point={
-              "hostname": data['debugContext']['debugData']['requestUri'],
-              "ip ": data['client']['ipAddress'],
-              "interface_id": data['client']['device']
+              """
+              Function to find the endpoint where authentication is requested
+              Parameters
+              ----------
+              data: Details about the event
+
+              Returns
+              ------
+              src_end_point: Returns the src end point
+              """
+              #Create JSON formatted string compatible with OCSF schema
+              src_end_point = {
+                  "hostname": data['debugContext']['debugData']['requestUri'],
+                  "ip ": data['client']['ipAddress'],
+                  "interface_id": data['client']['device']
               }
               return src_end_point
+
+
           def get_src_user(data):
-              src_user={
-                  'type':data['actor']['type'],
-                  'displayname':data['actor']['displayName'],
-                  'alternateID':data['actor']['alternateId']
+              """
+              Function to find the endpoint where authentication is requested
+              Parameters
+              ----------
+              data: Get existing user data
+
+              Returns
+              ------
+              src_user: Returns the user information
+              """
+              #Create JSON formatted string compatible with OCSF schema
+              src_user = {
+                  'type': data['actor']['type'],
+                  'displayname': data['actor']['displayName'],
+                  'alternateID': data['actor']['alternateId']
               }
               return src_user
-          def get_status_details(data):
-              status=data['outcome']['result']
-              status_code	='N/A'
-              status_detail=''
-              status_id=-1
-              if "SUCCESS" in status:
-                  status_detail="LOGON_USER_INITIATED"
-                  status_id=1
-              return status,status_code,status_detail,status_id
-          def tranform_data(data):
-              #get activity
-              activity,activity_id=get_activity_details(data['detail']['eventType'])
-              auth_protocol,auth_protocol_id=get_auth_protocol(data['detail']['authenticationContext']['authenticationProvider'])
-              category_name,category_uid=get_category()
-              class_name,class_uid=get_class()
-              is_cleartext=get_clearText_value(auth_protocol)
-              dst_endpoint=get_destination_endPoint(data['detail']['debugContext']['debugData'])
-              dst_user=data['detail']['actor']['alternateId']
-              enrichments=data['detail']['target']
-              _time=data['time']
-              logon_type,logon_type_id=get_logon_type(data['detail']['transaction'])
-              displayMessage=data['detail']['displayMessage']
-              ref_time=data['time']
-              profile=data['detail']['actor']['alternateId']
-              session_uid=data['detail']['authenticationContext']['externalSessionId']
-              severity,severity_id=get_severity(data['detail']['severity'])
-              src_endpoint=get_src_endpoint(data['detail'])
-              src_user=get_src_user(data['detail'])
-              status,status_code,status_detail,status_id = get_status_details(data['detail'])
-              type_uid='300201' #HardCoded
-              type_name='Authentication Audit: Logon'
-              json_data={
-                  'activity':activity,
-                  'activity_id':activity_id,
-                  'auth_protocol':auth_protocol,
-                  'auth_protocol_id':auth_protocol_id,
-                  'category_name':category_name,
-                  'category_uid':category_uid,
-                  'class_name':class_name,
-                  'class_uid':class_uid,
-                  'is_cleartext':is_cleartext,
-                  'dst_endpoint':dst_endpoint,
-                  'dst_user':dst_user,
-                  'enrichments':enrichments,
-                  '_time':_time,
-                  'logon_type':logon_type,
-                  'logon_type_id':logon_type_id,
-                  'displayMessage':displayMessage,
-                  'ref_time':ref_time,
-                  'profile':profile,
-                  'session_uid':session_uid,
-                  'severity':severity,
-                  'severity_id':severity_id,
-                  'src_endpoint':src_endpoint,
-                  'src_user':src_user,
-                  'status':status,
-                  'status_code':status_code,
-                  'status_detail':status_detail,
-                  'status_id':status_id,
-                  'type_uid':type_uid,
-                  'type_name':type_name
-              }
-              '''data=[[activity,activity_id,auth_protocol,auth_protocol_id,category_name,category_uid,class_name,class_uid,is_cleartext,destination_endpoint,dst_user,enrichments,_time,logon_type,
-                    logon_type_id,displayMessage,ref_time,profile,session_uid,severity,severity_id,src_endpoint,src_user,status,status_code,
-                    status_detail,status_id,type_uid,type_name]]
-              # data = [['tom', 10], ['nick', 15], ['juli', 14]]
-              #get
-              df = pd.DataFrame(data, columns=['activity','activity_id','auth_protocol','auth_protocol_id','category_name','category_uid','class_name','class_uid','is_cleartext','dst_endpoint',
-                                              'dst_user','enrichments','_time','logon_type','logon_type_id','displayMessage','ref_time','profile','session_uid','severity','severity_id',
-                                              'src_endpoint','src_user','status','status_code','status_detail','status_id','type_uid','type_name'])
-              '''
-              #df.to_csv("data.csv")
-              #df.to_csv("/tmp/data.csv", index=False,sep='\t', encoding='utf-8')
-              '''output=[]
-              output_record = {
-                  'result': 'Ok',
-                  'data': data
-              }
-              output.append(output_record)'''
-              return json_data
-              #return "data"
 
+
+          def get_status_details(data):
+              """
+              Function to find the endpoint where authentication is requested
+              Parameters
+              ----------
+              data: Get existing user data
+
+              Returns
+              ------
+              status: Returns the event status
+              status_code: Returns the event status code
+              status_detail: Details about authentication Request
+              status_id: Normalized ID for the status
+              """
+              status = data['outcome']['result']
+              status_code = 'N/A'
+              status_detail = ''
+              status_id = -1
+              if "SUCCESS" in status:
+                  status_detail = "LOGON_USER_INITIATED"
+                  status_id = 1
+              return status, status_code, status_detail, status_id
+
+          def get_type_category(eventType):
+              """
+              Function captures the event type for an event logged by Okta
+              get_audit_category function is dedicated for all the Audit Activity Types
+              This function can be be enhanced as more events are included
+              Returns
+              ------
+              type_name: Name of the event Type
+              type_uid: Type unique identifier for the activity
+              """
+              #The event category name, for Successful Authentication , category name and category_uid are selected based on the OCSF schema
+              type_uid= 0
+              type_name= "Unknown"
+              if "user.authentication" in eventType:
+                  type_name = 'Authentication Audit: Logon'
+                  type_uid = 300201
+              return type_uid, type_name
+
+          def tranform_data(data):
+              # get activity details based on the eventType that is published
+              activity, activity_id = get_activity_details(data['detail']['eventType'])
+              # get the authentication protocol used to create the user session.
+              auth_protocol, auth_protocol_id = get_auth_protocol(
+                  data['detail']['authenticationContext']['authenticationProvider'])
+              # get the event category name,
+              category_name, category_uid = get_audit_category(data['detail']['eventType'])
+              # get the event class name
+              class_name, class_uid = get_class()
+              # check if whether the credentials were passed in clear text.
+              is_cleartext = get_clear_text_value(auth_protocol)
+              # get the destination endpoint for which the authentication was targeted.
+              dst_endpoint = get_destination_endpoint(data['detail']['debugContext']['debugData'])
+              #get user details and account type used for authentication
+              dst_user = data['detail']['actor']['alternateId']
+              # get additional additional information which is critical for the event but doesn't fall under OCSF schema
+              enrichments = data['detail']['target']
+              # get time of the event
+              _time = data['time']
+              # get type of the logon
+              logon_type, logon_type_id = get_logon_type(data['detail']['transaction'])
+              # get the description of the message
+              displayMessage = data['detail']['displayMessage']
+              # get the original event as reported
+              ref_time = data['time']
+              # get userID value
+              profile = data['detail']['actor']['alternateId']
+              #get the Session UID value
+              session_uid = data['detail']['authenticationContext']['externalSessionId']
+              # get the log severity of the event
+              severity, severity_id = get_severity(data['detail']['severity'])
+              # get the endpoint from which the authentication was requested.
+              src_endpoint = get_src_endpoint(data['detail'])
+              # get existing user from which an activity was initiated.
+              src_user = get_src_user(data['detail'])
+              # get event status details in OCSF format
+              status, status_code, status_detail, status_id = get_status_details(data['detail'])
+              # get event type details in OCSF format
+              type_uid, type_name = get_type_category(data['detail']['eventType'])
+
+              #Assemeble the JSON string in OCSF format
+              json_data = {
+                  'activity_name': activity,
+                  'activity_id': activity_id,
+                  'auth_protocol': auth_protocol,
+                  'auth_protocol_id': auth_protocol_id,
+                  'category_name': category_name,
+                  'category_uid': category_uid,
+                  'class_name': class_name,
+                  'class_uid': class_uid,
+                  'is_cleartext': is_cleartext,
+                  'dst_endpoint': dst_endpoint,
+                  'dst_user': dst_user,
+                  'enrichments': enrichments,
+                  '_time': _time,
+                  'logon_type': logon_type,
+                  'logon_type_id': logon_type_id,
+                  'displayMessage': displayMessage,
+                  'ref_time': ref_time,
+                  'profile': profile,
+                  'session_uid': session_uid,
+                  'severity': severity,
+                  'severity_id': severity_id,
+                  'src_endpoint': src_endpoint,
+                  'src_user': src_user,
+                  'status': status,
+                  'status_code': status_code,
+                  'status_detail': status_detail,
+                  'status_id': status_id,
+                  'type_uid': type_uid,
+                  'type_name': type_name
+              }
+              # Return the JSON String
+              return json_data
       Handler: index.lambda_handler
       Role: !GetAtt Lambdarole.Arn
       Runtime: python3.8
@@ -310,7 +466,7 @@ Resources:
         Description: "Cloudformation for Glue database"
         Name: !Ref GlueDatabaseName
       CatalogId: !Ref AWS::AccountId
-  
+
   MyS3Bucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -342,7 +498,7 @@ Resources:
           Compressed: "false"
           Columns:
             - Type: string
-              Name: activity
+              Name: activity_name
             - Type: string
               Name: activity_id
             - Type: string
@@ -421,12 +577,16 @@ Resources:
       DeliveryStreamType: DirectPut
       ExtendedS3DestinationConfiguration:
         BucketARN: !Sub 'arn:aws:s3:::${MyS3Bucket}'
-        BufferingHints:
-          IntervalInSeconds: 300
-          SizeInMBs: 128
-        RoleARN: !GetAtt DeliveryRole.Arn
-        Prefix: sourcelocation=!{partitionKeyFromLambda:source}/region=!{partitionKeyFromLambda:region}/AWS_account=!{partitionKeyFromLambda:AWS_account}/eventhour=!{partitionKeyFromLambda:eventhour}/
+        #Prefix: "!{partitionKeyFromLambda:source}/region=!{partitionKeyFromLambda:region}/AWS_account=!{partitionKeyFromLambda:AWS_account}/eventhour=!{partitionKeyFromLambda:eventhour}/"
+        Prefix: !Join
+          - ''
+          - - !Select [3, !Split ["/", !Ref PartnerEventBus]]
+            - '/region=!{partitionKeyFromLambda:region}/AWS_account=!{partitionKeyFromLambda:AWS_account}/eventhour=!{partitionKeyFromLambda:eventhour}/'
         ErrorOutputPrefix: okta-ocsf-error
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 66
+        RoleARN: !GetAtt DeliveryRole.Arn
         DynamicPartitioningConfiguration:
           Enabled: true
         DataFormatConversionConfiguration:
@@ -637,12 +797,12 @@ Outputs:
    KinesisFirehose:
      Description: Kinesis Firehose Name
      Value: !Ref DeliveryStream
-   S3bucketname: 
+   S3bucketname:
      Value: !Ref MyS3Bucket
      Description: Name of the bucket created
-   GlueDatabase: 
+   GlueDatabase:
      Value: !Ref OCSFOktaDatabase
      Description: AWS Glue Database
-   GlueTable: 
+   GlueTable:
      Value: !Ref OCSFSchemaTable
      Description: AWS Glue Table
